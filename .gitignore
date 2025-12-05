@@ -4,4 +4,11 @@
 __pycache__/
 *.pyc
 .env
+# Ignore local model weights
+models/
+*.bin
+*.safetensors
+*.pt
+*.onnx
+.cache/
 
