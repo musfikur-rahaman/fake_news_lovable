@@ -69,9 +69,9 @@ elif USE_HF_INFERENCE:
 
 MODEL_CONFIG = {
     # Small fake-news model
-    "primary": "mrm8488/bert-tiny-finetuned-fake-news-detection",
+    "primary": "distilbert-base-uncased-finetuned-sst-2-english",
     # Sentiment / style model
-    "fallback": "distilbert-base-uncased-finetuned-sst-2-english",
+    "fallback": "mrm8488/bert-tiny-finetuned-fake-news-detection",
 }
 
 _ENSEMBLE_MODELS: Optional[Dict[str, Any]] = None  # pipeline or HF model IDs
