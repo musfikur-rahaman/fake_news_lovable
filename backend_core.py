@@ -5,29 +5,38 @@ import time
 from typing import Optional, Dict, Any, List, Tuple
 
 from dotenv import load_dotenv
-from supabase import create_client, Client
 from transformers import pipeline
+
+try:
+    from supabase import create_client, Client
+except ImportError:
+    create_client = None
+    Client = None
 
 from llmhelper import explain_fake_news
 from source_validator import (
     check_source_reputation,
-    get_source_score,          # available if you want it later
     analyze_url_characteristics,
-    extract_domain,
 )
 from url_content_fetcher import is_url, extract_article_content, normalize_url
 
 
-# ---------- ENV & SUPABASE SETUP ----------
+# ---------- ENV & SUPABASE SETUP (OPTIONAL) ----------
 
 load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise RuntimeError("Supabase URL or Key not found. Please set them in .env")
-
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase: Optional["Client"] = None
+if SUPABASE_URL and SUPABASE_KEY and create_client is not None:
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        print("✅ Supabase client initialized")
+    except Exception as e:
+        print(f"⚠️ Could not initialize Supabase client: {e}")
+        supabase = None
+else:
+    print("ℹ️ Supabase URL/KEY not set or supabase lib missing. Skipping DB logging.")
 
 
 # ---------- ENSEMBLE MODEL CONFIGURATION ----------
@@ -43,7 +52,7 @@ _MODEL_WEIGHTS: Optional[Dict[str, float]] = None
 
 def load_ensemble_models() -> Tuple[Dict[str, Any], Dict[str, float]]:
     """
-    Lazily load and cache the HuggingFace pipelines used for ensemble classification.
+    Lazily load and cache HuggingFace pipelines used for ensemble classification.
     """
     global _ENSEMBLE_MODELS, _MODEL_WEIGHTS
     if _ENSEMBLE_MODELS is not None and _MODEL_WEIGHTS is not None:
@@ -81,7 +90,7 @@ def load_ensemble_models() -> Tuple[Dict[str, Any], Dict[str, float]]:
         print(f"⚠️ Fallback model failed: {e}")
 
     if not models:
-        # Emergency: try to at least load primary as a single model
+        # Emergency: try to at least load primary
         try:
             models["primary"] = pipeline(
                 "text-classification",
@@ -103,11 +112,11 @@ def load_ensemble_models() -> Tuple[Dict[str, Any], Dict[str, float]]:
 
 def map_label(label: str, model_name: str = "primary") -> str:
     """
-    Map raw model labels to 'FAKE' or 'REAL', matching your Streamlit logic.
+    Map raw model labels to 'FAKE' or 'REAL'.
+    Mirrors your Streamlit logic.
     """
     label_str = str(label).upper()
 
-    # Fallback sentiment model mapping
     if model_name == "fallback":
         if "NEGATIVE" in label_str or "LABEL_0" in label_str:
             return "FAKE"
@@ -116,7 +125,6 @@ def map_label(label: str, model_name: str = "primary") -> str:
         else:
             return "REAL"
 
-    # Primary model mapping
     if "FAKE" in label_str or "LABEL_1" in label_str:
         return "FAKE"
     elif "REAL" in label_str or "LABEL_0" in label_str:
@@ -125,13 +133,13 @@ def map_label(label: str, model_name: str = "primary") -> str:
         return "REAL"
 
 
-# ---------- PATTERN DETECTORS (HALLUCINATION / SENSATIONAL) ----------
+# ---------- PATTERN DETECTORS ----------
 
 def detect_hallucination_patterns(text: str) -> bool:
     """
-    Pattern-based detector for absurd / impossible claims (from your Streamlit file).
+    Pattern-based detector for absurd / impossible claims.
     """
-    text_lower = text.lower()
+    t = text.lower()
 
     strong_indicators = [
         "microchip in vaccine", "5g caused", "flat earth", "alien body found",
@@ -142,17 +150,15 @@ def detect_hallucination_patterns(text: str) -> bool:
         "ai president", "ai sworn in", "ai supreme court", "robot judge",
         "resurrected dinosaurs", "teleportation device", "weather control machine",
     ]
-    for phrase in strong_indicators:
-        if phrase in text_lower:
-            return True
+    if any(p in t for p in strong_indicators):
+        return True
 
     contextual_indicators = [
         "breaking news", "shocking discovery", "they don't want you to know",
         "miracle cure", "secret revealed", "forbidden knowledge",
         "mainstream media won't tell you", "cover-up",
     ]
-    context_count = sum(1 for phrase in contextual_indicators if phrase in text_lower)
-    if context_count >= 2:
+    if sum(1 for p in contextual_indicators if p in t) >= 2:
         return True
 
     logical_indicators = [
@@ -161,21 +167,19 @@ def detect_hallucination_patterns(text: str) -> bool:
         "aliens elected", "living statue", "eternal youth formula",
         "humans can fly without aid", "animals talking to humans",
     ]
-    for phrase in logical_indicators:
-        if phrase in text_lower:
-            return True
+    if any(p in t for p in logical_indicators):
+        return True
 
     return False
 
 
 def detect_sensational_or_fictional(text: str) -> bool:
     """
-    Heuristic detector for obviously sensational, satirical, or fictional claims
-    (e.g., 'movie script written by cats').
+    Heuristic detector for obviously sensational / fictional content.
+    E.g. 'AI robot gains citizenship', 'script written by cats'.
     """
     t = text.lower()
 
-    # Direct satire / humor / fiction hints
     satire_keywords = [
         "satirical article", "satire piece", "satirical news",
         "this is satire", "parody article", "parody news",
@@ -194,15 +198,15 @@ def detect_sensational_or_fictional(text: str) -> bool:
         "moon made of cheese", "immortality pill",
         "talking animals", "animals talking to humans",
         "teleportation device", "weather control machine",
+        "robot gains citizenship", "ai robot gains citizenship",
     ]
 
     if any(k in t for k in satire_keywords):
         return True
-
     if any(k in t for k in absurd_keywords):
         return True
 
-    # Generic pattern: animal "wrote" something
+    # Generic pattern: animals writing things
     animal_words = ["cat", "cats", "dog", "dogs", "hamster", "hamsters"]
     if "wrote" in t or "written by" in t or "authored by" in t:
         if any(a in t for a in animal_words):
@@ -223,24 +227,21 @@ def fuse_predictions(
 ) -> Tuple[str, float]:
     """
     Apply post-processing rules:
-    - Force / boost FAKE for hallucination and sensational content
+    - Boost / force FAKE for hallucination + sensational content
     - Adjust based on source reputation
     """
     label = ensemble_label
     confidence = ensemble_confidence
 
-    # 1) Impossible / absurd patterns
     if halluc_flag:
         confidence = min(confidence + 0.35, 0.99)
         label = "FAKE"
 
-    # 2) Sensational / fictional content
     if sensational_flag:
         if label == "REAL":
             label = "FAKE"
         confidence = max(confidence, 0.75)
 
-    # 3) Source reputation adjustments
     if source_reputation:
         rep_level = source_reputation.get("level", "")
         source_weight = 0.15
@@ -266,8 +267,7 @@ def ensemble_classify(
     bool,
 ]:
     """
-    Core ensemble classification logic.
-
+    Run ensemble models, compute detailed per-model info, and aggregate.
     Returns:
         final_label, final_confidence, halluc_flag,
         source_reputation, source_warnings, model_details, sensational_flag
@@ -281,31 +281,27 @@ def ensemble_classify(
     real_score = 0.0
     total_weight = 0.0
 
-    # Run each model and collect detailed info
     for model_key, clf in models.items():
         try:
-            # e.g. {'label': 'LABEL_1', 'score': 0.87}
-            result = clf(text[:1000])[0]
+            result = clf(text[:1000])[0]  # {'label': '...', 'score': ...}
             raw_label = str(result["label"])
             score = float(result["score"])
             mapped = map_label(raw_label, model_name=model_key)
             weight = float(model_weights.get(model_key, 0.1))
 
-            # Probability of FAKE based on mapped label
             if mapped == "FAKE":
                 prob_fake = score
             else:
                 prob_fake = 1.0 - score
 
-            # Aggregate for ensemble
             fake_score += weight * prob_fake
             real_score += weight * (1.0 - prob_fake)
             total_weight += weight
 
-            # 👇 This is exactly the structure Lovable expects
+            # EXACT shape Lovable expects
             model_details.append(
                 {
-                    "model_name": model_key,      # you can rename more nicely if you want
+                    "model_name": model_key,
                     "raw_label": raw_label,
                     "mapped_label": mapped,
                     "score": score,
@@ -328,13 +324,9 @@ def ensemble_classify(
     ensemble_label = "FAKE" if fake_score > real_score else "REAL"
     ensemble_confidence = fake_score if ensemble_label == "FAKE" else real_score
 
-    # Hallucination / absurd patterns
     halluc_flag = detect_hallucination_patterns(text)
-
-    # Sensational / fictional patterns
     sensational_flag = detect_sensational_or_fictional(text)
 
-    # Source reputation
     source_reputation: Optional[Dict[str, Any]] = None
     source_warnings: List[str] = []
     if source_url and source_url.strip():
@@ -373,20 +365,26 @@ def classify_news(
     user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    High-level function used by the FastAPI endpoint.
-
-    - Detects URL vs raw text
-    - If URL, fetches and extracts article content + title
-    - Runs ensemble_classify()
-    - Generates LLM explanation for FAKE news
-    - Logs analysis to Supabase
-    - Returns JSON-serializable dict
+    This implements the SAME RESPONSE SHAPE your API currently returns:
+    - user_id
+    - input_text
+    - resolved_text
+    - label
+    - confidence
+    - hallucination_flag
+    - source_url
+    - source_reputation
+    - source_warnings
+    - explanation
+    - model_details
+    - fetch_error
+    - created_at
+    Plus new field: sensational_flag (safe to add).
     """
     raw_input = input_text.strip()
     normalized_input = normalize_url(raw_input)
 
-    article_text = raw_input
-    article_title: Optional[str] = None
+    resolved_text = raw_input
     source_url: Optional[str] = None
     fetch_error: Optional[str] = None
 
@@ -399,16 +397,17 @@ def classify_news(
             if error:
                 fetch_error = error
                 print(f"❌ URL fetch error: {error}")
-                article_text = raw_input
+                resolved_text = raw_input
             else:
                 print(f"✅ Article fetched: {article_title}")
+                resolved_text = article_text
         except Exception as e:
             fetch_error = str(e)
-            article_text = raw_input
+            resolved_text = raw_input
     else:
-        print("📄 Text detected; using raw input as article_text")
+        print("📄 Text detected; using raw input as resolved_text")
         source_url = None
-        article_text = raw_input
+        resolved_text = raw_input
 
     (
         label,
@@ -418,39 +417,38 @@ def classify_news(
         source_warnings,
         model_details,
         sensational_flag,
-    ) = ensemble_classify(article_text, source_url)
+    ) = ensemble_classify(resolved_text, source_url)
 
-    # LLM explanation for FAKE news
     explanation: Optional[str] = None
     if label == "FAKE":
         try:
-            explanation = explain_fake_news(article_text[:800])
+            explanation = explain_fake_news(resolved_text[:800])
         except Exception as e:
             print(f"❌ Explanation generation failed: {e}")
             explanation = None
 
     record: Dict[str, Any] = {
         "user_id": user_id,
-        "news": article_text,
-        "original_input": raw_input,
-        "source_url": source_url,
-        "article_title": article_title,
+        "input_text": raw_input,
+        "resolved_text": resolved_text,
         "label": label,
         "confidence": confidence,
         "hallucination_flag": halluc_flag,
         "sensational_flag": sensational_flag,
+        "source_url": source_url,
         "source_reputation": source_reputation,
         "source_warnings": source_warnings,
-        "model_details": model_details,  # 👈 now in the format Lovable wants
-        "fetch_error": fetch_error,
         "explanation": explanation,
-        "timestamp": int(time.time()),
+        "model_details": model_details,
+        "fetch_error": fetch_error,
+        "created_at": int(time.time()),
     }
 
-    # Adjust table name if your Supabase table is different
-    try:
-        supabase.table("news_analysis_history").insert(record).execute()
-    except Exception as e:
-        print(f"⚠️ Failed to log history in Supabase: {e}")
+    # Optional: log to Supabase if configured
+    if supabase is not None:
+        try:
+            supabase.table("news_analysis_history").insert(record).execute()
+        except Exception as e:
+            print(f"⚠️ Failed to log history in Supabase: {e}")
 
     return record
