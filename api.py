@@ -7,10 +7,9 @@ from backend_core import classify_news
 
 app = FastAPI(title="Fake News Detection API")
 
-# Allow Lovable frontend to call this API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],        # later you can restrict this to your Lovable domain
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -19,6 +18,14 @@ app.add_middleware(
 class AnalyzeRequest(BaseModel):
     text: str
     user_id: str | None = None
+
+# NEW: root path so hitting / in browser shows something nice
+@app.get("/")
+def root():
+    return {
+        "message": "Fake News Detection API is running.",
+        "endpoints": ["/health", "/api/analyze"],
+    }
 
 @app.get("/health")
 def health():
