@@ -4,8 +4,8 @@ import os
 import time
 from typing import Optional, Dict, Any, List, Tuple
 
+import requests
 from dotenv import load_dotenv
-from transformers import pipeline
 
 try:
     from supabase import create_client, Client
@@ -26,6 +26,7 @@ from url_content_fetcher import is_url, extract_article_content, normalize_url
 load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+HF_API_TOKEN = os.getenv("HF_API_TOKEN")
 
 supabase: Optional[Any] = None
 if SUPABASE_URL and SUPABASE_KEY and create_client is not None:
@@ -38,82 +39,92 @@ if SUPABASE_URL and SUPABASE_KEY and create_client is not None:
 else:
     print("ℹ️ Supabase URL/KEY not set or supabase lib missing. Skipping DB logging.")
 
+# Base headers for HF Inference API
+HF_BASE_HEADERS: Dict[str, str] = {"Content-Type": "application/json"}
+if HF_API_TOKEN:
+    HF_BASE_HEADERS["Authorization"] = f"Bearer {HF_API_TOKEN}"
+else:
+    print("⚠️ HF_API_TOKEN not set. Hugging Face Inference API calls may fail or be rate-limited.")
 
-# ---------- ENSEMBLE MODEL CONFIGURATION ----------
+
+# ---------- ENSEMBLE MODEL CONFIGURATION (HF API) ----------
 
 MODEL_CONFIG = {
     "primary": "mrm8488/bert-tiny-finetuned-fake-news-detection",
     "fallback": "distilbert-base-uncased-finetuned-sst-2-english",
 }
 
-_ENSEMBLE_MODELS: Optional[Dict[str, Any]] = None
+_ENSEMBLE_MODELS: Optional[Dict[str, str]] = None  # key -> HF model id string
 _MODEL_WEIGHTS: Optional[Dict[str, float]] = None
 
+HF_API_URL_BASE = "https://api-inference.huggingface.co/models/"
 
-def load_ensemble_models() -> Tuple[Dict[str, Any], Dict[str, float]]:
+
+def load_ensemble_models() -> Tuple[Dict[str, str], Dict[str, float]]:
     """
-    Lazily load and cache HuggingFace pipelines used for ensemble classification.
+    Lazily set and cache the Hugging Face model IDs and weights
+    used for ensemble classification.
+
+    Note: We do NOT load models locally; we call the HF Inference API.
     """
     global _ENSEMBLE_MODELS, _MODEL_WEIGHTS
     if _ENSEMBLE_MODELS is not None and _MODEL_WEIGHTS is not None:
         return _ENSEMBLE_MODELS, _MODEL_WEIGHTS
 
-    models: Dict[str, Any] = {}
-    model_weights: Dict[str, float] = {}
+    models: Dict[str, str] = {
+        "primary": MODEL_CONFIG["primary"],
+        "fallback": MODEL_CONFIG["fallback"],
+    }
+    model_weights: Dict[str, float] = {
+        "primary": 0.7,
+        "fallback": 0.3,
+    }
 
-    # Primary fake news model
-    try:
-        models["primary"] = pipeline(
-            "text-classification",
-            model=MODEL_CONFIG["primary"],
-            device=-1,
-            truncation=True,
-            max_length=256,
-        )
-        model_weights["primary"] = 0.7
-        print("✅ Loaded primary fake news model")
-    except Exception as e:
-        print(f"❌ Primary model failed: {e}")
-
-    # Fallback sentiment model
-    try:
-        models["fallback"] = pipeline(
-            "text-classification",
-            model=MODEL_CONFIG["fallback"],
-            device=-1,
-            truncation=True,
-            max_length=256,
-        )
-        model_weights["fallback"] = 0.3
-        print("✅ Loaded fallback sentiment model")
-    except Exception as e:
-        print(f"⚠️ Fallback model failed: {e}")
-
-    if not models:
-        # Emergency: try to at least load primary
-        try:
-            models["primary"] = pipeline(
-                "text-classification",
-                model=MODEL_CONFIG["primary"],
-                device=-1,
-                truncation=True,
-                max_length=256,
-            )
-            model_weights["primary"] = 1.0
-        except Exception as e:
-            print(f"❌ All models failed to load: {e}")
-            models = {}
-            model_weights = {}
-
+    print("✅ Ensemble configuration initialized for HF Inference API")
     _ENSEMBLE_MODELS = models
     _MODEL_WEIGHTS = model_weights
     return models, model_weights
 
 
+def hf_api_predict(model_id: str, text: str) -> Dict[str, Any]:
+    """
+    Call Hugging Face Inference API for a single text-classification model.
+
+    Returns a dict similar to a single HF pipeline output:
+        {"label": "...", "score": float}
+    """
+    url = HF_API_URL_BASE + model_id
+    payload = {"inputs": text}
+
+    try:
+        response = requests.post(url, headers=HF_BASE_HEADERS, json=payload, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+
+        # Possible formats:
+        # [ {"label": "...", "score": ...} ]
+        # or [ [ {"label": "...", "score": ...} ] ]
+        if isinstance(data, list) and len(data) > 0:
+            first = data[0]
+            if isinstance(first, list) and len(first) > 0 and isinstance(first[0], dict):
+                return first[0]
+            if isinstance(first, dict):
+                return first
+
+        # Fallback neutral
+        print(f"⚠️ Unexpected HF response format for {model_id}: {data}")
+        return {"label": "LABEL_0", "score": 0.5}
+
+    except Exception as e:
+        print(f"❌ HF API error for {model_id}: {e}")
+        # Neutral fallback
+        return {"label": "LABEL_0", "score": 0.5}
+
+
 def map_label(label: str, model_name: str = "primary") -> str:
     """
     Map raw model labels to 'FAKE' or 'REAL'.
-    Mirrors your Streamlit logic.
+    Mirrors your original logic.
     """
     label_str = str(label).upper()
 
@@ -176,7 +187,6 @@ def detect_hallucination_patterns(text: str) -> bool:
 def detect_sensational_or_fictional(text: str) -> bool:
     """
     Heuristic detector for obviously sensational / fictional content.
-    E.g. 'AI robot gains citizenship', 'script written by cats'.
     """
     t = text.lower()
 
@@ -267,10 +277,8 @@ def ensemble_classify(
     bool,
 ]:
     """
-    Run ensemble models, compute detailed per-model info, and aggregate.
-    Returns:
-        final_label, final_confidence, halluc_flag,
-        source_reputation, source_warnings, model_details, sensational_flag
+    Run ensemble models via HF Inference API, compute detailed per-model info,
+    and aggregate.
     """
     models, model_weights = load_ensemble_models()
     if not models:
@@ -281,11 +289,13 @@ def ensemble_classify(
     real_score = 0.0
     total_weight = 0.0
 
-    for model_key, clf in models.items():
+    truncated_text = text[:1000]
+
+    for model_key, model_id in models.items():
         try:
-            result = clf(text[:1000])[0]  # {'label': '...', 'score': ...}
-            raw_label = str(result["label"])
-            score = float(result["score"])
+            result = hf_api_predict(model_id, truncated_text)  # {"label": "...", "score": ...}
+            raw_label = str(result.get("label", "LABEL_0"))
+            score = float(result.get("score", 0.5))
             mapped = map_label(raw_label, model_name=model_key)
             weight = float(model_weights.get(model_key, 0.1))
 
@@ -298,10 +308,10 @@ def ensemble_classify(
             real_score += weight * (1.0 - prob_fake)
             total_weight += weight
 
-            # EXACT shape Lovable expects
             model_details.append(
                 {
                     "model_name": model_key,
+                    "hf_model_id": model_id,
                     "raw_label": raw_label,
                     "mapped_label": mapped,
                     "score": score,
@@ -311,7 +321,7 @@ def ensemble_classify(
             )
 
         except Exception as e:
-            print(f"Model {model_key} failed: {e}")
+            print(f"Model {model_key} ({model_id}) failed: {e}")
             continue
 
     if total_weight <= 0:
@@ -379,7 +389,7 @@ def classify_news(
     - model_details
     - fetch_error
     - created_at
-    Plus new field: sensational_flag (safe to add).
+    Plus: sensational_flag.
     """
     raw_input = input_text.strip()
     normalized_input = normalize_url(raw_input)
