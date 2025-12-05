@@ -27,7 +27,7 @@ load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-supabase: Optional["Client"] = None
+supabase: Optional[Any] = None
 if SUPABASE_URL and SUPABASE_KEY and create_client is not None:
     try:
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
