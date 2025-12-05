@@ -86,7 +86,7 @@ def extract_article_content(url):
         text = re.sub(r'\s+', ' ', text).strip()
         
         # Check if we got meaningful content
-        if len(text) < 100:
+        if len(text) < 10:
             return None, title, "Article content too short or could not be extracted properly."
         
         return text, title, None

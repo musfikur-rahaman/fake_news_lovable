@@ -6,10 +6,30 @@ from typing import Optional, Dict, Any, List, Tuple
 
 from dotenv import load_dotenv
 
-# Local transformers (for dev / laptop)
-from transformers import pipeline
+# ============================================================
+# ENVIRONMENT & MODE SETUP
+# ============================================================
 
-# Optional: Hugging Face Inference API (for Render)
+# Load .env for local dev; in Render, env vars are already set
+load_dotenv()
+
+RUN_MODE = os.getenv("RUN_MODE", "dev")  # "dev" (local) vs "prod"/others (Render, etc.)
+
+# ============================================================
+# CONDITIONAL IMPORTS
+# ============================================================
+
+# Local transformers (for dev / laptop ONLY)
+if RUN_MODE == "dev":
+    try:
+        from transformers import pipeline
+    except ImportError:
+        pipeline = None
+        print("⚠️ transformers not installed; local pipeline mode disabled.")
+else:
+    pipeline = None  # Never use local pipelines in production to avoid OOM
+
+# Optional: Hugging Face Inference API (for Render / remote inference)
 try:
     from huggingface_hub import InferenceClient
 except ImportError:
@@ -32,8 +52,6 @@ from url_content_fetcher import is_url, extract_article_content, normalize_url
 # ============================================================
 # ENVIRONMENT & CLIENT SETUP
 # ============================================================
-
-load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -68,9 +86,9 @@ elif USE_HF_INFERENCE:
 # ============================================================
 
 MODEL_CONFIG = {
-    # Small fake-news model
+    # Small fake-news / sentiment model
     "primary": "distilbert-base-uncased-finetuned-sst-2-english",
-    # Sentiment / style model
+    # Secondary model
     "fallback": "mrm8488/bert-tiny-finetuned-fake-news-detection",
 }
 
@@ -82,9 +100,9 @@ def load_ensemble_models() -> Tuple[Dict[str, Any], Dict[str, float]]:
     """
     Lazily load and cache models/pipelines used for ensemble classification.
 
-    Two modes:
-      - Local: transformers.pipeline (good for local dev)
-      - Remote: HuggingFace Inference API (good for Render)
+    Modes:
+      - Remote: HuggingFace Inference API (preferred for Render / low-RAM)
+      - Local: transformers.pipeline (ONLY in RUN_MODE=dev)
     """
     global _ENSEMBLE_MODELS, _MODEL_WEIGHTS
     if _ENSEMBLE_MODELS is not None and _MODEL_WEIGHTS is not None:
@@ -111,8 +129,21 @@ def load_ensemble_models() -> Tuple[Dict[str, Any], Dict[str, float]]:
         return models, model_weights
 
     # --------------------------------------------------------
-    # Local mode: transformers.pipeline
+    # Local mode: transformers.pipeline (dev only)
     # --------------------------------------------------------
+    if RUN_MODE != "dev":
+        # In production / Render we do NOT load local models to avoid OOM
+        print("⚠️ RUN_MODE != 'dev' and USE_HF_INFERENCE is false; no local models will be loaded.")
+        _ENSEMBLE_MODELS = {}
+        _MODEL_WEIGHTS = {}
+        return {}, {}
+
+    if pipeline is None:
+        print("⚠️ transformers.pipeline is not available; cannot load local models.")
+        _ENSEMBLE_MODELS = {}
+        _MODEL_WEIGHTS = {}
+        return {}, {}
+
     # Primary fake news model
     try:
         models["primary"] = pipeline(
@@ -137,7 +168,7 @@ def load_ensemble_models() -> Tuple[Dict[str, Any], Dict[str, float]]:
             max_length=256,
         )
         model_weights["fallback"] = 0.3
-        print("✅ Loaded fallback sentiment model (local pipeline)")
+        print("✅ Loaded fallback model (local pipeline)")
     except Exception as e:
         print(f"⚠️ Fallback model failed (local pipeline): {e}")
 
@@ -171,7 +202,10 @@ def _run_model_inference(model_key: str, model_obj: Any, text: str) -> Dict[str,
             result = hf_client.text_classification(snippet, model=model_id)
             if isinstance(result, list) and len(result) > 0:
                 r0 = result[0]
-                return {"label": r0.get("label", "LABEL_0"), "score": float(r0.get("score", 0.5))}
+                return {
+                    "label": r0.get("label", "LABEL_0"),
+                    "score": float(r0.get("score", 0.5)),
+                }
         except Exception as e:
             print(f"HF Inference failed for {model_key} ({model_id}): {e}")
             raise
@@ -480,15 +514,15 @@ def classify_news(
     High-level function used by the FastAPI endpoint.
     """
     raw_input = input_text.strip()
-    normalized_input = normalize_url(raw_input)
 
     resolved_text = raw_input
     source_url: Optional[str] = None
     fetch_error: Optional[str] = None
 
-    # Detect URL vs text
-    if normalized_input and is_url(normalized_input):
-        source_url = normalized_input
+    # Detect URL vs text using the RAW input first
+    if is_url(raw_input):
+        # Now normalize, e.g. remove "url:" prefixes etc.
+        source_url = normalize_url(raw_input)
         print(f"🔗 URL detected: {source_url}")
         try:
             article_text, article_title, error = extract_article_content(source_url)
@@ -522,7 +556,9 @@ def classify_news(
     # Only generate explanation if final label is FAKE
     if label == "FAKE":
         try:
+            print("🧠 Generating LLM explanation for FAKE prediction...")
             explanation = explain_fake_news(resolved_text[:800])
+            print("🧠 LLM explanation generated.")
         except Exception as e:
             print(f"❌ Explanation generation failed: {e}")
             explanation = None
