@@ -11,7 +11,7 @@ from transformers import pipeline
 from llmhelper import explain_fake_news
 from source_validator import (
     check_source_reputation,
-    get_source_score,          # kept in case you want to use it later
+    get_source_score,          # available if you want it later
     analyze_url_characteristics,
     extract_domain,
 )
@@ -44,7 +44,6 @@ _MODEL_WEIGHTS: Optional[Dict[str, float]] = None
 def load_ensemble_models() -> Tuple[Dict[str, Any], Dict[str, float]]:
     """
     Lazily load and cache the HuggingFace pipelines used for ensemble classification.
-    Mirrors your Streamlit logic but without UI.
     """
     global _ENSEMBLE_MODELS, _MODEL_WEIGHTS
     if _ENSEMBLE_MODELS is not None and _MODEL_WEIGHTS is not None:
@@ -230,12 +229,12 @@ def fuse_predictions(
     label = ensemble_label
     confidence = ensemble_confidence
 
-    # 1) Impossible / absurd patterns (hallucination-like)
+    # 1) Impossible / absurd patterns
     if halluc_flag:
         confidence = min(confidence + 0.35, 0.99)
         label = "FAKE"
 
-    # 2) Sensational / fictional content (e.g., 'script written by cats')
+    # 2) Sensational / fictional content
     if sensational_flag:
         if label == "REAL":
             label = "FAKE"
@@ -268,6 +267,7 @@ def ensemble_classify(
 ]:
     """
     Core ensemble classification logic.
+
     Returns:
         final_label, final_confidence, halluc_flag,
         source_reputation, source_warnings, model_details, sensational_flag
@@ -276,50 +276,54 @@ def ensemble_classify(
     if not models:
         return "REAL", 0.5, False, None, [], [], False
 
-    predictions: List[str] = []
-    confidence_scores: List[float] = []
     model_details: List[Dict[str, Any]] = []
-
-    for model_name, model in models.items():
-        try:
-            result = model(text[:1000])[0]
-            label = map_label(result["label"], model_name)
-            score = float(result["score"])
-            predictions.append(label)
-            confidence_scores.append(score)
-            model_details.append(
-                {
-                    "model": model_name,
-                    "label": label,
-                    "confidence": score,
-                    "weight": model_weights.get(model_name, 0.1),
-                }
-            )
-        except Exception as e:
-            print(f"Model {model_name} failed: {e}")
-            continue
-
-    if not predictions:
-        print("⚠️ All models failed, using fallback classification")
-        return "REAL", 0.5, False, None, [], [], False
-
     fake_score = 0.0
     real_score = 0.0
     total_weight = 0.0
 
-    for i, (model_name, prediction) in enumerate(zip(models.keys(), predictions)):
-        if model_name in model_weights and i < len(confidence_scores):
-            weight = model_weights[model_name]
-            confidence = confidence_scores[i]
-            if prediction == "FAKE":
-                fake_score += weight * confidence
+    # Run each model and collect detailed info
+    for model_key, clf in models.items():
+        try:
+            # e.g. {'label': 'LABEL_1', 'score': 0.87}
+            result = clf(text[:1000])[0]
+            raw_label = str(result["label"])
+            score = float(result["score"])
+            mapped = map_label(raw_label, model_name=model_key)
+            weight = float(model_weights.get(model_key, 0.1))
+
+            # Probability of FAKE based on mapped label
+            if mapped == "FAKE":
+                prob_fake = score
             else:
-                real_score += weight * confidence
+                prob_fake = 1.0 - score
+
+            # Aggregate for ensemble
+            fake_score += weight * prob_fake
+            real_score += weight * (1.0 - prob_fake)
             total_weight += weight
 
-    if total_weight > 0:
-        fake_score /= total_weight
-        real_score /= total_weight
+            # 👇 This is exactly the structure Lovable expects
+            model_details.append(
+                {
+                    "model_name": model_key,      # you can rename more nicely if you want
+                    "raw_label": raw_label,
+                    "mapped_label": mapped,
+                    "score": score,
+                    "weight": weight,
+                    "prob_fake": prob_fake,
+                }
+            )
+
+        except Exception as e:
+            print(f"Model {model_key} failed: {e}")
+            continue
+
+    if total_weight <= 0:
+        print("⚠️ All models failed, using fallback classification")
+        return "REAL", 0.5, False, None, [], [], False
+
+    fake_score /= total_weight
+    real_score /= total_weight
 
     ensemble_label = "FAKE" if fake_score > real_score else "REAL"
     ensemble_confidence = fake_score if ensemble_label == "FAKE" else real_score
@@ -437,7 +441,7 @@ def classify_news(
         "sensational_flag": sensational_flag,
         "source_reputation": source_reputation,
         "source_warnings": source_warnings,
-        "model_details": model_details,
+        "model_details": model_details,  # 👈 now in the format Lovable wants
         "fetch_error": fetch_error,
         "explanation": explanation,
         "timestamp": int(time.time()),
