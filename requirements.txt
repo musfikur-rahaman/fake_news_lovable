@@ -1,0 +1,31 @@
+# Core
+streamlit
+requests
+beautifulsoup4
+python-dotenv
+
+# Transformers / Hugging Face (CPU-only)
+transformers
+torch
+sentence-transformers
+accelerate
+
+# Haystack (CPU-compatible)
+farm-haystack
+
+# LangChain
+langchain
+langchain-groq
+
+supabase==1.0.0
+requests
+fastapi
+uvicorn[standard]
+python-dotenv
+supabase
+requests
+transformers
+torch           # if you used PyTorch models
+groq            # or openai / other LLM client you're using
+newspaper3k     # only if you used it for URL article extraction
+beautifulsoup4  # if used in your scraper

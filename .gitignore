@@ -1,0 +1,7 @@
+# Ignore Streamlit secrets
+.streamlit/secrets.toml
+.env
+__pycache__/
+*.pyc
+.env
+
