@@ -15,6 +15,12 @@ load_dotenv()
 
 RUN_MODE = os.getenv("RUN_MODE", "dev")  # "dev" (local) vs "prod"/others (Render, etc.)
 
+# Explanations ON by default in dev, OFF by default in prod
+ENABLE_EXPLANATIONS = os.getenv(
+    "ENABLE_EXPLANATIONS",
+    "1" if RUN_MODE == "dev" else "0",
+).lower() in {"1", "true", "yes"}
+
 # ============================================================
 # CONDITIONAL IMPORTS
 # ============================================================
@@ -58,6 +64,12 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 HF_API_KEY = os.getenv("HF_API_KEY") or os.getenv("HUGGINGFACEHUB_API_TOKEN")
 USE_HF_INFERENCE = os.getenv("USE_HF_INFERENCE", "0").lower() in {"1", "true", "yes"}
+
+print(
+    f"App starting with RUN_MODE={RUN_MODE}, "
+    f"USE_HF_INFERENCE={USE_HF_INFERENCE}, "
+    f"ENABLE_EXPLANATIONS={ENABLE_EXPLANATIONS}"
+)
 
 supabase: Optional[Any] = None
 if SUPABASE_URL and SUPABASE_KEY and create_client is not None:
@@ -553,8 +565,8 @@ def classify_news(
     ) = ensemble_classify(resolved_text, source_url)
 
     explanation: Optional[str] = None
-    # Only generate explanation if final label is FAKE
-    if label == "FAKE":
+    # Only generate explanation if final label is FAKE *and* explanations enabled
+    if label == "FAKE" and ENABLE_EXPLANATIONS:
         try:
             print("🧠 Generating LLM explanation for FAKE prediction...")
             explanation = explain_fake_news(resolved_text[:800])
