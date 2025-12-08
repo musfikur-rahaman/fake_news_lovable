@@ -21,6 +21,9 @@ ENABLE_EXPLANATIONS = os.getenv(
     "1" if RUN_MODE == "dev" else "0",
 ).lower() in {"1", "true", "yes"}
 
+# Supabase table (fixed to analysis_history by default)
+SUPABASE_TABLE = os.getenv("SUPABASE_TABLE", "analysis_history")
+
 # ============================================================
 # CONDITIONAL IMPORTS
 # ============================================================
@@ -36,10 +39,16 @@ else:
     pipeline = None  # Never use local pipelines in production to avoid OOM
 
 # Optional: Hugging Face Inference API (for Render / remote inference)
+InferenceClient = None
 try:
-    from huggingface_hub import InferenceClient
-except ImportError:
-    InferenceClient = None
+    # Newer huggingface_hub versions (>= 0.20)
+    from huggingface_hub.inference import InferenceClient  # type: ignore
+except Exception:
+    try:
+        # Older huggingface_hub versions (< 0.20)
+        from huggingface_hub import InferenceClient  # type: ignore
+    except Exception:
+        InferenceClient = None
 
 # Optional: Supabase logging
 try:
@@ -64,7 +73,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 HF_API_KEY = (
     os.getenv("HF_API_KEY")
-    or os.getenv("HF_API_TOKEN")           # in case you used this name
+    or os.getenv("HF_API_TOKEN")
     or os.getenv("HUGGINGFACEHUB_API_TOKEN")
 )
 USE_HF_INFERENCE = os.getenv("USE_HF_INFERENCE", "0").lower() in {"1", "true", "yes"}
@@ -86,7 +95,7 @@ if SUPABASE_URL and SUPABASE_KEY and create_client is not None:
 else:
     print("ℹ️ Supabase URL/KEY not set or supabase lib missing. Skipping DB logging.")
 
-hf_client: Optional[InferenceClient] = None
+hf_client: Optional["InferenceClient"] = None
 if USE_HF_INFERENCE and HF_API_KEY and InferenceClient is not None:
     try:
         hf_client = InferenceClient(token=HF_API_KEY)
@@ -103,8 +112,10 @@ elif USE_HF_INFERENCE:
 
 # Primary = fake-news model, fallback = sentiment model
 MODEL_CONFIG = {
+    # Fake news classifier
     "primary": "mrm8488/bert-tiny-finetuned-fake-news-detection",
-    "fallback": "distilbert-base-uncased-finetuned-sst-2-english",
+    # Sentiment classifier (note org prefix for HF Inference)
+    "fallback": "distilbert/distilbert-base-uncased-finetuned-sst-2-english",
 }
 
 _ENSEMBLE_MODELS: Optional[Dict[str, Any]] = None  # pipeline or HF model IDs
@@ -130,7 +141,6 @@ def load_ensemble_models() -> Tuple[Dict[str, Any], Dict[str, float]]:
     # Remote mode: Hugging Face Inference API
     # --------------------------------------------------------
     if USE_HF_INFERENCE and hf_client is not None:
-        # In this mode, we just store the model_ids; inference happens via hf_client
         models["primary"] = MODEL_CONFIG["primary"]
         model_weights["primary"] = 0.7
         print(f"✅ Using HF Inference API for primary: {models['primary']}")
@@ -147,7 +157,6 @@ def load_ensemble_models() -> Tuple[Dict[str, Any], Dict[str, float]]:
     # Local mode: transformers.pipeline (dev only)
     # --------------------------------------------------------
     if RUN_MODE != "dev":
-        # In production / Render we do NOT load local models to avoid OOM
         print("⚠️ RUN_MODE != 'dev' and USE_HF_INFERENCE is false; no local models will be loaded.")
         _ENSEMBLE_MODELS = {}
         _MODEL_WEIGHTS = {}
@@ -743,7 +752,6 @@ def classify_news(
 
     # Detect URL vs text using the RAW input first
     if is_url(raw_input):
-        # Now normalize, e.g. remove "url:" prefixes etc.
         source_url = normalize_url(raw_input)
         print(f"🔗 URL detected: {source_url}")
         try:
@@ -805,7 +813,7 @@ def classify_news(
     # Optional DB logging
     if supabase is not None:
         try:
-            supabase.table("news_analysis_history").insert(record).execute()
+            supabase.table(SUPABASE_TABLE).insert(record).execute()
         except Exception as e:
             print(f"⚠️ Failed to log history in Supabase: {e}")
 
