@@ -62,7 +62,11 @@ from url_content_fetcher import is_url, extract_article_content, normalize_url
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-HF_API_KEY = os.getenv("HF_API_KEY") or os.getenv("HUGGINGFACEHUB_API_TOKEN")
+HF_API_KEY = (
+    os.getenv("HF_API_KEY")
+    or os.getenv("HF_API_TOKEN")           # in case you used this name
+    or os.getenv("HUGGINGFACEHUB_API_TOKEN")
+)
 USE_HF_INFERENCE = os.getenv("USE_HF_INFERENCE", "0").lower() in {"1", "true", "yes"}
 
 print(
@@ -97,11 +101,10 @@ elif USE_HF_INFERENCE:
 # ENSEMBLE MODEL CONFIGURATION
 # ============================================================
 
+# Primary = fake-news model, fallback = sentiment model
 MODEL_CONFIG = {
-    # Small fake-news / sentiment model
-    "primary": "distilbert-base-uncased-finetuned-sst-2-english",
-    # Secondary model
-    "fallback": "mrm8488/bert-tiny-finetuned-fake-news-detection",
+    "primary": "mrm8488/bert-tiny-finetuned-fake-news-detection",
+    "fallback": "distilbert-base-uncased-finetuned-sst-2-english",
 }
 
 _ENSEMBLE_MODELS: Optional[Dict[str, Any]] = None  # pipeline or HF model IDs
@@ -156,7 +159,7 @@ def load_ensemble_models() -> Tuple[Dict[str, Any], Dict[str, float]]:
         _MODEL_WEIGHTS = {}
         return {}, {}
 
-    # Primary fake news model
+    # Primary fake news model (local dev only)
     try:
         models["primary"] = pipeline(
             "text-classification",
@@ -170,7 +173,7 @@ def load_ensemble_models() -> Tuple[Dict[str, Any], Dict[str, float]]:
     except Exception as e:
         print(f"❌ Primary model failed (local pipeline): {e}")
 
-    # Fallback sentiment model
+    # Fallback sentiment model (local dev only)
     try:
         models["fallback"] = pipeline(
             "text-classification",
@@ -180,7 +183,7 @@ def load_ensemble_models() -> Tuple[Dict[str, Any], Dict[str, float]]:
             max_length=256,
         )
         model_weights["fallback"] = 0.3
-        print("✅ Loaded fallback model (local pipeline)")
+        print("✅ Loaded fallback sentiment model (local pipeline)")
     except Exception as e:
         print(f"⚠️ Fallback model failed (local pipeline): {e}")
 
@@ -238,10 +241,13 @@ def _run_model_inference(model_key: str, model_obj: Any, text: str) -> Dict[str,
 def map_label(label: str, model_name: str = "primary") -> str:
     """
     Map raw model labels to 'FAKE' or 'REAL'.
+
+    - primary  = fake-news model (expects FAKE/REAL or LABEL_0/1)
+    - fallback = sentiment model (NEGATIVE ~ FAKE, POSITIVE ~ REAL)
     """
     label_str = str(label).upper()
 
-    # DistilBERT sentiment-style mapping
+    # Fallback sentiment-style mapping
     if model_name == "fallback":
         if "NEGATIVE" in label_str or "LABEL_0" in label_str:
             return "FAKE"
@@ -265,37 +271,226 @@ def map_label(label: str, model_name: str = "primary") -> str:
 
 def detect_hallucination_patterns(text: str) -> bool:
     """
-    Pattern-based detector for absurd / impossible claims.
-    This is a heuristic risk flag, not an absolute truth.
+    Pattern-based detector for absurd / impossible / highly implausible claims.
+    This is a heuristic risk flag, not a ground-truth detector.
+    Returns True if the text strongly looks like hallucination / fake content.
     """
     t = text.lower()
 
-    strong_indicators = [
-        "microchip in vaccine", "5g caused", "flat earth", "alien body found",
-        "alien mining", "flying pigs", "zombie outbreak", "immortality pill",
-        "magic cure", "government hiding aliens", "time travel", "talking animals",
-        "glowing blue river", "digitally altered", "deepfake", "photoshop",
-        "edited image", "emotionally intelligent toaster",
-        "ai president", "ai sworn in", "ai supreme court", "robot judge",
-        "resurrected dinosaurs", "teleportation device", "weather control machine",
+    # 1. Physically / scientifically impossible claims
+    impossible_science = [
+        "humans can fly without aid",
+        "humans can fly without wings",
+        "breathing underwater without equipment",
+        "breathe underwater without equipment",
+        "perpetual motion machine",
+        "free energy device",
+        "infinite energy machine",
+        "defies the laws of physics",
+        "breaks the laws of physics",
+        "gravity turned off",
+        "gravity reversed",
+        "sun stopped in the sky",
+        "the sun stopped moving",
+        "the moon disappeared",
+        "moon made of cheese",
+        "earth stopped rotating",
+        "earth stopped spinning",
+        "faster than light travel",
+        "ftl travel",
+        "teleportation device",
+        "instant teleportation",
+        "time travel machine",
+        "time-travel machine",
+        "time traveler from the future",
+        "time traveller from the future",
+        "time traveler from the past",
+        "time traveller from the past",
+        "resurrected dinosaurs",
+        "ancient dinosaurs roaming cities",
+        "telekinesis is now real",
+        "telepathy is now proven",
+        "controlling weather with a machine",
+        "weather control machine",
+        "controlling earthquakes with a device",
     ]
-    if any(p in t for p in strong_indicators):
+
+    # 2. Pseudoscientific / miracle cure claims
+    miracle_health = [
+        "cures all diseases",
+        "cure for every disease",
+        "instant cure for cancer",
+        "cancer cured overnight",
+        "cancer cured in one day",
+        "no side effects and cures everything",
+        "miracle cure",
+        "secret cure doctors don't want you to know",
+        "secret cure doctors dont want you to know",
+        "heals any illness instantly",
+        "heals every illness instantly",
+        "reverse aging completely",
+        "stop aging completely",
+        "immortality pill",
+        "live forever with this pill",
+        "live forever thanks to this",
+        "100% guaranteed weight loss overnight",
+        "lose 50 pounds in a week with no effort",
+        "reverse death",
+        "bring the dead back to life",
+        "raises the dead",
+        "superfood that cures everything",
+        "magic herb that cures all",
+        "quantum healing for all diseases",
+    ]
+
+    # 3. Extreme conspiracy / grand control narratives
+    extreme_conspiracies = [
+        "global elite controls every government",
+        "one secret group controls the world",
+        "shadow government controls everything",
+        "secret world government",
+        "world is secretly ruled by lizard people",
+        "world is secretly ruled by reptilians",
+        "shape-shifting reptilian",
+        "shape shifting reptilian",
+        "lizard people running the government",
+        "vaccines contain microchips",
+        "vaccine contains a microchip",
+        "microchip in vaccine",
+        "5g caused the virus",
+        "5g caused covid",
+        "chemtrails are mind control",
+        "chemtrails control the population",
+        "moon landing was filmed in a studio",
+        "all news is fake except this",
+        "mainstream media always lies",
+        "government hiding aliens among us",
+        "government hiding aliens",
+        "aliens living among us disguised as humans",
+        "aliens living among us disguised as animals",
+        "flat earth proof",
+        "earth is flat and nasa is lying",
+        "nasa is hiding the truth about earth",
+        "massive global cover-up",
+        "they don't want you to know the truth",
+        "they dont want you to know the truth",
+        "truth they don't want you to know",
+        "truth they dont want you to know",
+        "secret society controls reality",
+        "secret society controls everything",
+        "world leaders are actually androids",
+    ]
+
+    # 4. Supernatural / magical power claims in a news tone
+    supernatural_claims = [
+        "real wizard discovered",
+        "real witch discovered",
+        "witch casts spell on entire city",
+        "spell cast over an entire country",
+        "vampires confirmed real",
+        "werewolves confirmed real",
+        "zombie outbreak",
+        "zombie apocalypse has started",
+        "talking animals announce",
+        "animals suddenly learned to talk",
+        "ghost caught on official camera",
+        "ghost elected to office",
+        "demon caught on tape",
+        "angel spotted giving interviews",
+        "magic wand that changes reality",
+        "magic ritual broadcast on live tv",
+        "portal to another dimension opened",
+        "doorway to another universe opened",
+    ]
+
+    # 5. Obviously fictional tech / AI roles framed as current reality
+    absurd_tech = [
+        "ai president of the united states",
+        "ai sworn in as president",
+        "ai sworn in as the president",
+        "ai sworn in as prime minister",
+        "ai is now the king",
+        "robot judge in the supreme court",
+        "robot judge in the u.s. supreme court",
+        "ai supreme court justice",
+        "ai wins human election",
+        "robot elected as president",
+        "robot elected as prime minister",
+        "first cyborg president",
+        "self-aware toaster takes over the world",
+        "emotionally intelligent toaster",
+        "sentient fridge gives political speeches",
+        "ai takes full control of all governments",
+        "single computer now controls all money",
+        "all human jobs replaced overnight by ai",
+    ]
+
+    # 6. Totally absurd / comedic imagery
+    absurd_imagery = [
+        "flying pigs spotted",
+        "pigs flying over the city",
+        "cows flying through the sky",
+        "fish walking on land and giving interviews",
+        "cats wrote the script",
+        "script written by cats",
+        "governed entirely by hamsters",
+        "hamsters now run the country",
+        "penguins discovered living in the sahara desert",
+        "desert suddenly turned into chocolate",
+        "sky turned into cheese",
+        "trees suddenly started walking",
+    ]
+
+    # 7. Strong "obviously edited" image / deepfake hints
+    edited_media = [
+        "clearly photoshopped image",
+        "digitally altered image",
+        "digitally altered photo",
+        "deepfake video",
+        "obvious deepfake",
+        "this image is clearly edited",
+        "obvious photoshop",
+        "blatantly edited screenshot",
+        "fake screenshot circulating online",
+    ]
+
+    # 8. "Too good to be true" unlimited deals framed as real news
+    impossible_offers = [
+        "every citizen will receive unlimited money",
+        "government will pay everyone a million dollars",
+        "bank gives free money to everyone",
+        "no work required and you get rich",
+        "everyone's debt will be erased overnight",
+        "everyones debt will be erased overnight",
+        "worldwide student loans cancelled instantly",
+    ]
+
+    # Any match in clearly absurd/impossible categories → True
+    for group in [
+        impossible_science,
+        miracle_health,
+        supernatural_claims,
+        absurd_tech,
+        absurd_imagery,
+        edited_media,
+        impossible_offers,
+    ]:
+        if any(p in t for p in group):
+            return True
+
+    # For extreme conspiracies, require at least one strong phrase
+    if any(p in t for p in extreme_conspiracies):
         return True
 
-    contextual_indicators = [
-        "breaking news", "shocking discovery", "they don't want you to know",
-        "miracle cure", "secret revealed", "forbidden knowledge",
-        "mainstream media won't tell you", "cover-up",
+    # Additional softer triggers combined
+    soft_triggers = [
+        "this proves the earth is flat",
+        "undeniable proof that everything is fake",
+        "everyone has been lied to for centuries",
+        "nothing you know is real",
+        "everything you know is a lie",
     ]
-    if sum(1 for p in contextual_indicators if p in t) >= 2:
-        return True
-
-    logical_indicators = [
-        "sworn into the u.s. supreme court", "machine president", "time traveler",
-        "moon made of cheese", "aliens elected", "eternal youth formula",
-        "humans can fly without aid", "animals talking to humans",
-    ]
-    if any(p in t for p in logical_indicators):
+    if any(p in t for p in soft_triggers):
         return True
 
     return False
@@ -358,15 +553,23 @@ def fuse_predictions(
 
     Key design:
       - Heuristic detectors (hallucination/sensational) are *risk flags*, not hard overrides.
-      - For highly reliable sources (e.g., CNN), we are conservative about calling FAKE.
+      - For high-trust sources (e.g., CNN, BBC), we are conservative about calling FAKE.
     """
     label = ensemble_label
     confidence = ensemble_confidence
 
-    high_trust_source = (
-        source_reputation is not None
-        and source_reputation.get("level", "").lower() == "highly reliable"
+    rep_level = (
+        source_reputation.get("level", "").lower()
+        if source_reputation
+        else ""
     )
+
+    # Treat these as high-trust sources
+    high_trust_source = rep_level in {
+        "highly reliable",
+        "generally reliable",
+        "fact-checker",
+    }
 
     # 1. Heuristic risk signals (soft influence)
     if halluc_flag or sensational_flag:
@@ -378,27 +581,34 @@ def fuse_predictions(
             else:
                 confidence = min(confidence + 0.10, 0.95)
         else:
-            # For CNN / major outlets: treat as "flag this for review" but
-            # do not flip REAL → FAKE on heuristics alone.
+            # For CNN / major outlets: treat as "flag this for review"
+            # but do not flip REAL → FAKE on heuristics alone.
             confidence = min(confidence + 0.05, 0.90)
 
     # 2. Source reputation effects
     if source_reputation:
-        rep_level = source_reputation.get("level", "")
         source_weight = 0.15
 
-        if rep_level in ["Unreliable", "Satire"]:
+        if rep_level in ["unreliable", "satire"]:
             if label == "FAKE":
                 confidence = min(confidence + 0.15, 0.99)
             elif label == "REAL" and confidence < 0.7:
                 label = "FAKE"
                 confidence = 0.75
 
-        elif rep_level == "Highly Reliable":
+        elif rep_level == "highly reliable":
             # Only accept FAKE if model is strongly confident
             if label == "FAKE" and confidence < 0.80:
                 label = "REAL"
                 confidence = max(confidence, 0.55)
+            else:
+                confidence = max(confidence, 0.60)
+
+        elif rep_level == "generally reliable":
+            # Even stricter: only call FAKE if confidence is very high
+            if label == "FAKE" and confidence < 0.90:
+                label = "REAL"
+                confidence = max(confidence, 0.60)
             else:
                 confidence = max(confidence, 0.60)
 
@@ -565,12 +775,12 @@ def classify_news(
     ) = ensemble_classify(resolved_text, source_url)
 
     explanation: Optional[str] = None
-    # Only generate explanation if final label is FAKE *and* explanations enabled
-    if label == "FAKE" and ENABLE_EXPLANATIONS:
+    # Always generate some explanation for FAKE; llmhelper decides whether to call LLM or fallback
+    if label == "FAKE":
         try:
-            print("🧠 Generating LLM explanation for FAKE prediction...")
+            print("🧠 Generating explanation for FAKE prediction...")
             explanation = explain_fake_news(resolved_text[:800])
-            print("🧠 LLM explanation generated.")
+            print("🧠 Explanation generated.")
         except Exception as e:
             print(f"❌ Explanation generation failed: {e}")
             explanation = None
