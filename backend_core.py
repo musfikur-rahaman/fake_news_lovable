@@ -828,3 +828,12 @@ def classify_news(
         "fetch_error": fetch_error,
         "created_at": int(time.time()),
     }
+
+    # Optional DB logging
+    if supabase is not None:
+        try:
+            supabase.table(SUPABASE_TABLE).insert(record).execute()
+        except Exception as e:
+            print(f"⚠️ Failed to log history in Supabase ({SUPABASE_TABLE}): {e}")
+
+    return record
