@@ -95,7 +95,7 @@ if SUPABASE_URL and SUPABASE_KEY and create_client is not None:
 else:
     print("ℹ️ Supabase URL/KEY not set or supabase lib missing. Skipping DB logging.")
 
-hf_client: Optional["InferenceClient"] = None
+hf_client: Optional[InferenceClient] = None
 if USE_HF_INFERENCE and HF_API_KEY and InferenceClient is not None:
     try:
         hf_client = InferenceClient(token=HF_API_KEY)
@@ -474,7 +474,6 @@ def detect_hallucination_patterns(text: str) -> bool:
         "worldwide student loans cancelled instantly",
     ]
 
-    # Any match in clearly absurd/impossible categories → True
     for group in [
         impossible_science,
         miracle_health,
@@ -487,11 +486,9 @@ def detect_hallucination_patterns(text: str) -> bool:
         if any(p in t for p in group):
             return True
 
-    # For extreme conspiracies, require at least one strong phrase
     if any(p in t for p in extreme_conspiracies):
         return True
 
-    # Additional softer triggers combined
     soft_triggers = [
         "this proves the earth is flat",
         "undeniable proof that everything is fake",
@@ -560,27 +557,27 @@ def fuse_predictions(
     """
     Merge model predictions with heuristic detectors and source reputation.
 
-    Key design:
-      - Heuristic detectors (hallucination/sensational) are *risk flags*, not hard overrides.
-      - For high-trust sources (e.g., CNN, BBC), we are conservative about calling FAKE.
+    Updated policy:
+      - For HIGH-TRUST sources (Highly Reliable, Generally Reliable, Fact-Checker),
+        we are VERY conservative about calling FAKE.
+      - Heuristic detectors (hallucination/sensational) are risk flags, not
+        hard overrides, especially for high-trust domains.
     """
     label = ensemble_label
     confidence = ensemble_confidence
 
-    rep_level = (
-        source_reputation.get("level", "").lower()
-        if source_reputation
-        else ""
-    )
+    rep_level_raw = source_reputation.get("level") if source_reputation else None
+    rep_level = (rep_level_raw or "").lower()
 
-    # Treat these as high-trust sources
-    high_trust_source = rep_level in {
-        "highly reliable",
-        "generally reliable",
-        "fact-checker",
-    }
+    is_highly_reliable = rep_level == "highly reliable"
+    is_generally_reliable = rep_level == "generally reliable"
+    is_fact_checker = rep_level == "fact-checker"
 
-    # 1. Heuristic risk signals (soft influence)
+    high_trust_source = is_highly_reliable or is_generally_reliable or is_fact_checker
+
+    # ------------------------------
+    # 1. Heuristic risk signals
+    # ------------------------------
     if halluc_flag or sensational_flag:
         if not high_trust_source:
             # Only push toward FAKE if we don't trust the source strongly
@@ -590,14 +587,15 @@ def fuse_predictions(
             else:
                 confidence = min(confidence + 0.10, 0.95)
         else:
-            # For CNN / major outlets: treat as "flag this for review"
-            # but do not flip REAL → FAKE on heuristics alone.
+            # For high-trust sources, heuristics only slightly adjust confidence.
+            # They do NOT flip REAL → FAKE on their own.
             confidence = min(confidence + 0.05, 0.90)
 
+    # ------------------------------
     # 2. Source reputation effects
+    # ------------------------------
     if source_reputation:
-        source_weight = 0.15
-
+        # LOW / UNKNOWN trust sources behave similar to previous logic
         if rep_level in ["unreliable", "satire"]:
             if label == "FAKE":
                 confidence = min(confidence + 0.15, 0.99)
@@ -605,24 +603,45 @@ def fuse_predictions(
                 label = "FAKE"
                 confidence = 0.75
 
-        elif rep_level == "highly reliable":
-            # Only accept FAKE if model is strongly confident
-            if label == "FAKE" and confidence < 0.80:
-                label = "REAL"
-                confidence = max(confidence, 0.55)
-            else:
-                confidence = max(confidence, 0.60)
+        elif rep_level == "mixed reliability":
+            # Slightly nudge confidence but don't flip by itself
+            confidence = min(max(confidence, 0.5), 0.95)
 
-        elif rep_level == "generally reliable":
-            # Even stricter: only call FAKE if confidence is very high
-            if label == "FAKE" and confidence < 0.90:
-                label = "REAL"
-                confidence = max(confidence, 0.60)
+        # HIGH TRUST HANDLING (strong guardrails)
+        elif is_fact_checker:
+            # Fact-checkers are extremely unlikely to publish fake content.
+            # In this system we NEVER output FAKE for fact-checking domains.
+            label = "REAL"
+            confidence = max(confidence, 0.80)
+
+        elif is_highly_reliable:
+            # Highly reliable (BBC, Reuters, AP, NYT, etc.)
+            if label == "FAKE":
+                # Only keep FAKE if VERY high confidence + heuristics triggered
+                if (halluc_flag or sensational_flag) and confidence >= 0.98:
+                    confidence = max(confidence, 0.90)
+                else:
+                    label = "REAL"
+                    confidence = max(confidence, 0.75)
             else:
-                confidence = max(confidence, 0.60)
+                # If labeled REAL, ensure decent minimum confidence
+                confidence = max(confidence, 0.70)
+
+        elif is_generally_reliable:
+            # Mainstream but possibly biased (CNN, Fox, etc.)
+            if label == "FAKE":
+                # Require extremely high confidence + heuristics
+                if (halluc_flag or sensational_flag) and confidence >= 0.99:
+                    confidence = max(confidence, 0.92)
+                else:
+                    label = "REAL"
+                    confidence = max(confidence, 0.70)
+            else:
+                confidence = max(confidence, 0.65)
 
         else:
-            # Neutral / mixed sources: small smoothing only
+            # Neutral / unknown sources: light smoothing only
+            source_weight = 0.15
             confidence = confidence * (1.0 - source_weight) + source_weight * confidence
 
     # 3. Clamp confidence to [0.1, 0.99]
@@ -809,12 +828,3 @@ def classify_news(
         "fetch_error": fetch_error,
         "created_at": int(time.time()),
     }
-
-    # Optional DB logging
-    if supabase is not None:
-        try:
-            supabase.table(SUPABASE_TABLE).insert(record).execute()
-        except Exception as e:
-            print(f"⚠️ Failed to log history in Supabase: {e}")
-
-    return record

@@ -94,7 +94,11 @@ def explain_fake_news(text: str) -> str:
     """
     Generate a short explanation for why news may be fake.
 
-    In PROD / low-memory mode, this can be disabled via ENABLE_EXPLANATIONS=0.
+    IMPORTANT:
+    - Do NOT speculate about the URL, link structure, or date.
+    - Do NOT say an article is fake just because the date looks 'in the future'
+      relative to your training data.
+    - Focus ONLY on the content of the text: plausibility, evidence, language.
     """
     if not ENABLE_EXPLANATIONS:
         # Lightweight fallback text if LLM is disabled
@@ -106,15 +110,35 @@ def explain_fake_news(text: str) -> str:
         )
 
     prompt = (
-        "Analyze the following news content and explain why it might be fake news. "
+        "You are assisting with analysis of potential fake news.\n\n"
+        "You will be given ONLY the article text content (no metadata is reliable "
+        "to you). You MUST follow these rules:\n"
+        "- Analyze ONLY the claims and language in the text itself.\n"
+        "- Do NOT speculate about the URL, link length, or how 'brief' it looks.\n"
+        "- Do NOT guess based on the publication date or say something is fake "
+        "just because the date looks like it is in the future.\n"
+        "- Do NOT claim that a reputable outlet (such as AP News, Reuters, BBC, "
+        "CNN, etc.) is suspicious based only on its name or domain.\n"
+        "- If the content is mostly normal news reporting with no obvious "
+        "implausible claims, say that the text does not strongly resemble fake "
+        "news, but still recommend external fact-checking.\n"
+        "- If there are strong signs of misinformation (impossible claims, "
+        "conspiracy language, miracle cures, no evidence, or clear emotional "
+        "manipulation), explain those concretely.\n"
+        "- Be cautious and humble: you are NOT a fact-checking authority and have "
+        "no access to the live web.\n\n"
         "Focus on:\n"
-        "1. Logical inconsistencies or impossibilities\n"
-        "2. Sensational or emotional language\n"
-        "3. Lack of credible sources or evidence\n"
-        "4. Common fake news patterns\n"
-        "5. Recommendations for verification\n\n"
-        f"Content: {text[:800]}\n\n"
-        "Provide a balanced, factual explanation in 3-4 sentences:"
+        "1. Logical inconsistencies or obvious impossibilities in the claims\n"
+        "2. Sensational or overly emotional language\n"
+        "3. Lack of concrete evidence or vague references to unnamed sources\n"
+        "4. Common fake news patterns (conspiracy framing, miracle cures, etc.)\n"
+        "5. Recommendations for how a human should verify the story (e.g., check "
+        "official websites, multiple outlets, or fact-checkers).\n\n"
+        f"Article text:\n{text[:800]}\n\n"
+        "Now, in 3–4 sentences, give a balanced explanation of why this content "
+        "might be fake or misleading, OR say that there are no strong indicators "
+        "of fake news but that verification is still recommended. Do NOT mention "
+        "URL structure, link length, or publication dates in your explanation."
     )
 
     try:
@@ -122,7 +146,11 @@ def explain_fake_news(text: str) -> str:
         response = llm.invoke(prompt)
         return response.content.strip()
     except Exception as e:
-        return f"Unable to generate explanation: {str(e)}"
+        return (
+            "Unable to generate a detailed explanation due to an internal error. "
+            "However, you should still verify this information using trusted "
+            f"sources and fact-checking sites. (Error: {str(e)})"
+        )
 
 
 def fact_check(text: str) -> str:
@@ -137,12 +165,13 @@ def fact_check(text: str) -> str:
 
     prompt = (
         "Carefully analyze this news content and determine if it's FAKE or REAL.\n"
+        "You do NOT have access to the live internet and cannot verify links.\n"
+        "You MUST NOT rely on the date or URL structure alone to call something fake.\n"
         "Consider:\n"
-        "- Factual accuracy and plausibility\n"
-        "- Source credibility (if mentioned)\n"
-        "- Evidence and specifics provided\n"
+        "- Factual plausibility and internal consistency\n"
+        "- Presence or absence of specific evidence\n"
         "- Common misinformation patterns\n"
-        "- Sensationalism vs factual reporting\n\n"
+        "- Sensationalism vs neutral reporting tone\n\n"
         f"Content: {text[:1000]}\n\n"
         "Answer ONLY with FAKE or REAL. Do not add explanations."
     )
@@ -179,14 +208,20 @@ def get_llm_explanation(text: str, classification: str) -> str:
         )
 
     prompt = (
-        "Explain why this news content appears to be REAL and credible.\n"
-        "Consider:\n"
-        "- Factual consistency\n"
-        "- Plausible claims with evidence\n"
-        "- Professional tone and language\n"
-        "- Lack of common fake news patterns\n\n"
-        f"Content: {text[:800]}\n\n"
-        "Provide a brief explanation in 2-3 sentences:"
+        "You are analyzing news text that was classified as likely REAL.\n\n"
+        "You must:\n"
+        "- Focus ONLY on the content of the text (not URL, link structure, or dates).\n"
+        "- NOT say something is fake or real based on the publication date.\n"
+        "- NOT speculate that a reputable outlet (AP, Reuters, BBC, CNN, etc.) "
+        "is suspicious.\n"
+        "- Highlight why the style looks like normal, credible reporting IF that "
+        "is the case (specific details, neutral tone, balanced language, etc.).\n"
+        "- Remind the user that you cannot verify facts against the internet and "
+        "that they should still double-check important claims.\n\n"
+        f"Article text:\n{text[:800]}\n\n"
+        "In 2–3 sentences, explain why this content appears broadly credible or "
+        "plausible, while still encouraging independent verification. Do NOT talk "
+        "about URLs, link structure, or publication dates."
     )
     try:
         llm = get_llm()
@@ -194,8 +229,9 @@ def get_llm_explanation(text: str, classification: str) -> str:
         return response.content.strip()
     except Exception:
         return (
-            "This content appears legitimate based on AI analysis, but you should "
-            "still verify important claims with trusted sources."
+            "This content appears broadly plausible and does not strongly match "
+            "common misinformation patterns, but you should still verify important "
+            "claims using trusted, up-to-date sources."
         )
 
 
