@@ -90,7 +90,7 @@ def extract_article_content(url: str):
             return None, None, "URL does not appear to contain readable HTML content."
 
         # Limit content to a safe maximum (e.g., 1 MB)
-        max_bytes = 5_000_000  # 1 MB
+        max_bytes = 10_000_000  # 1 MB
         chunks = []
         downloaded = 0
         for chunk in response.iter_content(chunk_size=8192):
