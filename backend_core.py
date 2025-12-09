@@ -111,14 +111,11 @@ elif USE_HF_INFERENCE:
 # ============================================================
 
 # Primary = fake-news model, fallback = sentiment model
-# 🔄 UPDATED:
-#   - primary: DeBERTa-v3-base (fake news classifier / base encoder)
-#   - fallback: Twitter-RoBERTa-base sentiment (tone / polarity)
 MODEL_CONFIG = {
-    # Fake news classifier (now DeBERTa-v3-base)
-    "primary": "microsoft/deberta-v3-base",
-    # Sentiment / tone classifier (Twitter-RoBERTa sentiment)
-    "fallback": "cardiffnlp/twitter-roberta-base-sentiment-latest",
+    # Fake news classifier
+    "primary": "mrm8488/bert-tiny-finetuned-fake-news-detection",
+    # Sentiment classifier (note org prefix for HF Inference)
+    "fallback": "distilbert/distilbert-base-uncased-finetuned-sst-2-english",
 }
 
 _ENSEMBLE_MODELS: Optional[Dict[str, Any]] = None  # pipeline or HF model IDs
@@ -181,7 +178,7 @@ def load_ensemble_models() -> Tuple[Dict[str, Any], Dict[str, float]]:
             max_length=256,
         )
         model_weights["primary"] = 0.7
-        print("✅ Loaded primary fake news model (local pipeline, DeBERTa-v3-base)")
+        print("✅ Loaded primary fake news model (local pipeline)")
     except Exception as e:
         print(f"❌ Primary model failed (local pipeline): {e}")
 
@@ -195,7 +192,7 @@ def load_ensemble_models() -> Tuple[Dict[str, Any], Dict[str, float]]:
             max_length=256,
         )
         model_weights["fallback"] = 0.3
-        print("✅ Loaded fallback sentiment model (local pipeline, Twitter-RoBERTa sentiment)")
+        print("✅ Loaded fallback sentiment model (local pipeline)")
     except Exception as e:
         print(f"⚠️ Fallback model failed (local pipeline): {e}")
 
@@ -254,27 +251,21 @@ def map_label(label: str, model_name: str = "primary") -> str:
     """
     Map raw model labels to 'FAKE' or 'REAL'.
 
-    - primary  = fake-news classifier (DeBERTa-v3-base used as encoder; we assume
-                 LABEL_1 or FAKE-ish label means 'fake', LABEL_0 or REAL-ish means 'real').
-    - fallback = sentiment model (Twitter-RoBERTa sentiment: NEGATIVE ~ FAKE risk,
-                 NEUTRAL/POSITIVE ~ REAL-leaning).
+    - primary  = fake-news model (expects FAKE/REAL or LABEL_0/1)
+    - fallback = sentiment model (NEGATIVE ~ FAKE, POSITIVE ~ REAL)
     """
     label_str = str(label).upper()
 
-    # Fallback sentiment-style mapping (Twitter-RoBERTa: NEGATIVE / NEUTRAL / POSITIVE)
+    # Fallback sentiment-style mapping
     if model_name == "fallback":
         if "NEGATIVE" in label_str or "LABEL_0" in label_str:
             return "FAKE"
-        elif "POSITIVE" in label_str or "LABEL_2" in label_str:
-            return "REAL"
-        elif "NEUTRAL" in label_str or "LABEL_1" in label_str:
-            # Treat neutral tone as slightly more likely to be REAL than FAKE
+        elif "POSITIVE" in label_str or "LABEL_1" in label_str:
             return "REAL"
         else:
-            # Safe default
             return "REAL"
 
-    # Primary fake-news model (DeBERTa encoder fine-tuned or used via generic head)
+    # Primary fake-news model
     if "FAKE" in label_str or "LABEL_1" in label_str:
         return "FAKE"
     elif "REAL" in label_str or "LABEL_0" in label_str:
@@ -846,3 +837,4 @@ def classify_news(
             print(f"⚠️ Failed to log history in Supabase ({SUPABASE_TABLE}): {e}")
 
     return record
+
